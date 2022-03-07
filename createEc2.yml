@@ -1,0 +1,140 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: False
+
+  vars:
+    keypair: <AWS KEYPAIR NAME>
+    instance_type: t2.micro
+    image: ami-085e5f73648d8fe14
+    wait: yes
+    group: webserver
+    count: 1
+    region: us-west-2
+    security_group: test_security_group
+    vpc_id: <VPC ID>
+    subnet_id: <SUBNET ID>
+
+  tasks:
+
+    - name: Create my security group
+      ec2_group:
+        name: "{{ security_group }}"
+        description: Security Group for webserver
+        region: "{{ region }}"
+        vpc_id: "{{ vpc_id }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: <Specifc IP>/32
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: <Specific IP>/32
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: <Specific IP>/32
+        rules_egress:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 443
+            to_port: 443
+            cidr_ip: 0.0.0.0/0
+      register: basic_firewall
+
+
+    - name: Launch the new EC2 Instance
+      ec2:
+        group_id: "{{ basic_firewall.group_id }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        wait: yes
+        region: "{{ region }}"
+        key_name: "{{ keypair }}"
+        count: "{{ count }}"
+        instance_tags:
+          Name: "Test EC2 instance"
+          EnvName: Test Environment
+      register: ec2
+
+
+    - name: Add ec2 host to hostlist
+      add_host: 
+        hostname: "{{ item.public_ip }}"
+        groups: ec2hosts
+      loop: "{{ ec2.instances }}"
+
+
+    - name: Wait for SSH to come up
+      wait_for:
+        host: "{{ item.public_ip }}"
+        port: 22
+        state: started
+      loop: "{{ ec2.instances }}"
+
+- name: Install HTTPD and Run It
+  hosts: ec2hosts
+  gather_facts: yes
+
+  vars:
+
+  tasks:
+
+    - name: Deploy SSH Key
+      authorized_key: 
+        user: centos
+        state: present
+        key: "{{ lookup('file', '/home/centos/.ssh/id_rsa.pub') }}"
+
+    - name: Deploy my SSH Key
+      authorized_key: 
+        user: centos
+        state: present
+        key: "{{ lookup('file', '/home/centos/.ssh/authorized_keys') }}"
+    
+    - name: Install apache packages and firewalld
+      yum:
+        name: '{{ item }}'
+        state: present
+      with_items:
+        - httpd
+        - firewalld
+        - python
+      become: yes
+
+    - name: Make sure httpd is running
+      service:
+        name: httpd
+        state: started
+      become: yes
+
+    - name: Make sure firewalld is running
+      service:
+        name: firewalld
+        state: started
+      become: yes
+
+    - name: Open port 80
+      firewalld:
+        port: 80/tcp
+        permanent: true
+        state: enabled
+      become: yes
+
+    - name: Restart the firewall
+      service:
+        name: firewalld
+        state: restarted
+      become: yes
+
+    - name: Add index file
+      copy:
+        dest: /var/www/html/index.html
+        content: |
+          {{ ansible_facts.eth0.ipv4.address }}
+      become: yes
